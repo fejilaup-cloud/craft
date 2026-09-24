@@ -192,4 +192,72 @@ describe('DELETE /api/deployments/[id]/domains/[domain]', () => {
         const { DELETE } = await import('./route');
         expect((await DELETE(makeRequest(), { params })).status).toBe(500);
     });
+
+    // ── HTTPS status reset on domain detach (Issue #1252) ───────────────────────
+
+    describe('HTTPS status reset on domain detach (#1252)', () => {
+        it('clears custom_domain to reset HTTPS status when domain is detached', async () => {
+            const mockUpdate = vi.fn(() => ({ eq: vi.fn().mockResolvedValue({ error: null }) }));
+            mockFrom
+                .mockReturnValueOnce(makeSupabaseQuery([{ data: { user_id: fakeUser.id }, error: null }]))
+                .mockReturnValueOnce({
+                    select: vi.fn(() => ({
+                        eq: vi.fn(() => ({
+                            single: vi.fn().mockResolvedValue({
+                                data: { vercel_project_id: 'prj_1', custom_domain: 'example.com' },
+                                error: null,
+                            }),
+                        })),
+                    })),
+                })
+                .mockReturnValueOnce({ update: mockUpdate });
+            mockRemoveDomainWithCleanup.mockResolvedValue({
+                success: true,
+                domain: 'example.com',
+                aliasesMatched: 1,
+            });
+
+            const { DELETE } = await import('./route');
+            await DELETE(makeRequest(), { params });
+
+            // Verify that custom_domain is cleared, which resets the HTTPS status
+            expect(mockUpdate).toHaveBeenCalledWith({ custom_domain: null });
+        });
+
+        it('prevents stale HTTPS status after domain removal and re-addition', async () => {
+            // This test verifies the fix for #1252:
+            // Before: domain delete didn't clear custom_domain, so HTTPS endpoint
+            //         would still return stale cert status from before deletion
+            // After: domain delete clears custom_domain, so HTTPS endpoint
+            //        will return 404, forcing fresh provisioning on re-addition
+            const mockUpdate = vi.fn(() => ({ eq: vi.fn().mockResolvedValue({ error: null }) }));
+            mockFrom
+                .mockReturnValueOnce(makeSupabaseQuery([{ data: { user_id: fakeUser.id }, error: null }]))
+                .mockReturnValueOnce({
+                    select: vi.fn(() => ({
+                        eq: vi.fn(() => ({
+                            single: vi.fn().mockResolvedValue({
+                                data: { vercel_project_id: 'prj_1', custom_domain: 'example.com' },
+                                error: null,
+                            }),
+                        })),
+                    })),
+                })
+                .mockReturnValueOnce({ update: mockUpdate });
+            mockRemoveDomainWithCleanup.mockResolvedValue({
+                success: true,
+                domain: 'example.com',
+                aliasesMatched: 0,
+            });
+
+            const { DELETE } = await import('./route');
+            const res = await DELETE(makeRequest(), { params });
+
+            expect(res.status).toBe(200);
+            // After domain detach, custom_domain field is set to null,
+            // which forces the HTTPS status endpoint to return 404.
+            // On re-addition, the domain will start fresh from 'pending' state.
+            expect(mockUpdate).toHaveBeenCalledWith({ custom_domain: null });
+        });
+    });
 });
